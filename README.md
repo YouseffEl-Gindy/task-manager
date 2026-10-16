@@ -14,7 +14,9 @@ Browser --> Next.js on Vercel --(rewrites /api/*)--> ASP.NET Core API on Azure A
 
 The browser only ever calls the Vercel site. Next.js forwards `/api/*` to the backend, so the login cookie belongs to the Vercel site and no CORS is needed.
 
-More detail: [`docs/SPEC.md`](docs/SPEC.md) (spec, decisions log) and [`docs/API.md`](docs/API.md) (API contract).
+**Live:** app https://youseff-task-manager.vercel.app · API https://youseff-task-manager-api-h3gdfedxckekc3ab.italynorth-01.azurewebsites.net (`/health`)
+
+More detail: [`STRUCTURE.md`](STRUCTURE.md) (how the code is organized), [`docs/SPEC.md`](docs/SPEC.md) (spec, decisions log) and [`docs/API.md`](docs/API.md) (API contract).
 
 ---
 
@@ -71,7 +73,9 @@ dotnet user-secrets set "ConnectionStrings:Default" "Server=tcp:<server>.databas
 dotnet user-secrets list --project backend/src/TaskManager.Api   # check (prints the values, so not on a shared screen)
 ```
 
-> **Important:** there is **one** Azure SQL database, used by **both production and local runs** (a deliberate choice for now). With user secrets set, your local backend reads and writes **production data**. Empty the tables before real users sign up.
+> **Important:** there is **one** Azure SQL database, used by **both production and local runs** (a deliberate choice for now). With user secrets set, your local backend reads and writes **production data**. (The test data was cleared on 2026-10-16, before real users.)
+>
+> The Azure SQL firewall only lets in allowed IP addresses. If your home IP changes, SSMS and the local backend get blocked: in SSMS's firewall popup, sign in with your Azure account and choose **Add my client IP address** (not the subnet range). The live app is not affected.
 
 Back to SQLite (this deletes **all** user secrets of the project, including the connection string):
 
@@ -128,7 +132,9 @@ Runs on every push to `main`, every pull request into `main`, and manually (Acti
 
 ## Deploy (`.github/workflows/deploy-api.yml`)
 
-Deploys **the backend only**. Vercel deploys the frontend by itself on every push.
+Deploys **the backend only**. Vercel builds the frontend by itself on every push, but **Deployment Checks** make it wait for all 5 CI checks before the build goes live on the production domain. Branches and pull requests get Vercel *Preview* builds (which use the same production backend and database).
+
+**Making a change:** create a branch, push it, open a pull request into `main` (CI runs on the PR), and merge when the checks pass. The merge runs CI on `main`, which deploys the backend and releases the frontend.
 
 1. Runs automatically when the **CI workflow succeeds for a push to `main`**, and deploys exactly the commit CI tested. Pull requests never deploy. It can also be started manually from `main` (Actions tab, "Deploy API", "Run workflow"); that skips CI, so use it only to redeploy something that already passed.
 2. On a Windows runner: `dotnet publish -c Release -p:UseAppHost=false`. This is framework-dependent and portable (AnyCPU), so it runs on the App Service's own .NET 10 runtime in the **32-bit** worker of the Free plan. `web.config` starts it with `dotnet .\TaskManager.Api.dll`. `appsettings.Development.json` is removed from the package.
@@ -153,9 +159,9 @@ Deploys **the backend only**. Vercel deploys the frontend by itself on every pus
 
 The production schema is created and updated by the app itself at startup (`Database__Schema=Migrate`). GitHub runners never connect to the database.
 
-## Remaining one-time steps
+## One-time setup (done on 2026-10-16)
 
-Do these once, after the code is on GitHub:
+All of these are done. They're kept here in case anything has to be redone (for example after resetting the publish profile):
 
 1. **Enable publish credentials.** Azure portal, open the web app, then **Settings > Configuration > General settings**. Turn **SCM Basic Auth Publishing Credentials** **On** and click **Save**.
 2. **Download the publish profile.** Open the web app's **Overview** and click **Download publish profile**. The file (`*.PublishSettings`) contains a deploy password: never commit it. `.gitignore` blocks it, but keep it out of the repo folder anyway.
@@ -169,6 +175,7 @@ Do these once, after the code is on GitHub:
    3. Under **Environment Variables**, add `BACKEND_URL` = `https://youseff-task-manager-api-h3gdfedxckekc3ab.italynorth-01.azurewebsites.net` (no trailing slash), for **Production** and **Preview**.
    4. Click **Deploy**. `BACKEND_URL` is read at build time: if you ever change it, **redeploy**.
    5. Optional: under Settings > Build and Deployment, set Node.js to 24.x to match CI.
+   6. Under **Settings > Build and Deployment > Deployment Checks**, add the 5 GitHub checks from `ci.yml`. Keep **Settings > Environments > Production > Auto-assign Custom Production Domains** on, so a build goes live automatically once the checks pass. (No `repository_dispatch` status action is needed: CI runs on push.)
 8. **Smoke test.** Open the Vercel URL, register, create a task, log out and log in again.
 
 ### Secrets checklist
@@ -177,7 +184,7 @@ Do these once, after the code is on GitHub:
 |---|---|---|
 | Azure SQL connection string (app user password) | App Service **Connection strings** (`Default`); locally only in .NET user secrets | the repo, `.env` files, this README |
 | SQL server admin password | Your password manager | anywhere else |
-| Publish profile | GitHub secret `AZURE_WEBAPP_PUBLISH_PROFILE` | the repo, your Downloads folder (after step 4) |
+| Publish profile | GitHub secret `AZURE_WEBAPP_PUBLISH_PROFILE` | the repo (public!), your Downloads folder (after step 4) |
 | `BACKEND_URL` | Vercel environment variable (not a secret, just config) | n/a |
 
 ## Good to know
