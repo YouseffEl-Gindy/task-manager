@@ -1,0 +1,116 @@
+# Deploys the backend (TaskManager.Api) to Azure App Service (Windows, Free F1, .NET 10).
+#
+# When it runs:
+#   - automatically, after the "CI" workflow finishes SUCCESSFULLY for a push to main
+#     (it deploys exactly the commit CI tested);
+#   - manually (Actions tab -> Deploy API -> Run workflow), from main only. A manual run skips CI,
+#     so only use it to redeploy main after CI has already passed.
+#
+# Needs one GitHub secret: AZURE_WEBAPP_PUBLISH_PROFILE (the App Service publish profile XML).
+# Migrations are applied by the app itself at startup (Database__Schema=Migrate on App Service).
+#
+# Fallback (not used today): if the .NET 10 runtime is ever missing on the Windows plan, publish
+# self-contained for the 32-bit worker instead:
+#   dotnet publish ... -c Release -r win-x86 --self-contained true -o <dir>
+name: Deploy API
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two deploys at once; a queued deploy waits for the running one instead of cancelling it.
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+env:
+  # The App Service *name* (Azure portal -> the web app -> Overview -> Name).
+  AZURE_WEBAPP_NAME: youseff-task-manager-api
+  # The App Service default domain (no trailing slash).
+  AZURE_WEBAPP_URL: https://youseff-task-manager-api-h3gdfedxckekc3ab.italynorth-01.azurewebsites.net
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  deploy:
+    name: Publish and deploy to Azure App Service
+    # workflow_run: only a successful CI run for a push to main in THIS repository
+    # (a pull request from a fork whose branch is also called "main" must never deploy).
+    # workflow_dispatch: only from main.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    # Windows runner so the publish output (web.config) is produced exactly as for a Windows App Service.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The exact commit CI tested (workflow_run), or the current main commit (manual run).
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Framework-dependent and portable (no runtime identifier): the App Service's own .NET 10 runtime
+      # runs it, in whatever bitness the worker uses (Free F1 on Windows = 32-bit).
+      # UseAppHost=false: no TaskManager.Api.exe (which would be x64-only); web.config starts it with
+      # `dotnet .\TaskManager.Api.dll` instead.
+      - name: dotnet publish (Release, framework-dependent, AnyCPU)
+        shell: bash
+        run: >-
+          dotnet publish backend/src/TaskManager.Api/TaskManager.Api.csproj
+          -c Release
+          -p:UseAppHost=false
+          -o "$RUNNER_TEMP/api-publish"
+
+      # appsettings.Development.json is never loaded in Production; leaving it out means a wrong
+      # ASPNETCORE_ENVIRONMENT fails loudly instead of quietly switching to SQLite + Swagger.
+      - name: Check publish output
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/api-publish"
+          rm -f appsettings.Development.json
+          test -f web.config || { echo "web.config is missing"; exit 1; }
+          test -f TaskManager.Api.dll || { echo "TaskManager.Api.dll is missing"; exit 1; }
+          if ls ./*.db ./*.db-shm ./*.db-wal secrets.json ./*.publishsettings ./*.PublishSettings 2>/dev/null | grep -q .; then
+            echo "Unexpected local database / secrets file in the publish output"; exit 1
+          fi
+          cat web.config
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: ${{ runner.temp }}/api-publish
+
+      # F1 has no Always On (cold start) and the free Azure SQL database may be paused, and the first
+      # start after a deploy also applies migrations. Allow up to ~10 minutes before failing.
+      - name: Health check (GET /health until 200)
+        shell: bash
+        run: |
+          url="$AZURE_WEBAPP_URL/health"
+          for i in $(seq 1 40); do
+            status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$url" || true)"
+            echo "Attempt $i: HTTP $status"
+            if [ "$status" = "200" ]; then
+              echo "Healthy: $url"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "The API did not report healthy at $url. Check the App Service log stream."
+          exit 1

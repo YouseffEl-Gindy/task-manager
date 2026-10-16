@@ -1,0 +1,249 @@
+# CI: every push to main and every pull request into main (plus a manual run button).
+# Any failing job fails the run. deploy-api.yml only deploys after this whole workflow succeeds on main.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR cancels the older, still-running CI.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  NODE_VERSION: "24"
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  # Build + unit tests + integration tests on SQLite in-memory (SPEC 5.6).
+  backend:
+    name: Backend (build, unit + integration tests on SQLite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj', 'dotnet-tools.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/TaskManager.sln
+
+      # Warnings are printed in the log (and summarised at the end); they don't fail the build.
+      - name: Build
+        run: dotnet build backend/TaskManager.sln -c Release --no-restore
+
+      - name: Unit tests
+        run: dotnet test backend/tests/TaskManager.Api.UnitTests -c Release --no-build
+
+      - name: Integration tests (SQLite in-memory)
+        run: dotnet test backend/tests/TaskManager.Api.IntegrationTests -c Release --no-build
+
+  # The model and the SQL Server migrations must match (SPEC 5.6). Uses AppDbContextDesignTimeFactory: no database needed.
+  migrations-check:
+    name: Migrations check (no pending model changes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj', 'dotnet-tools.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore local tools (dotnet-ef, pinned in dotnet-tools.json)
+        run: dotnet tool restore
+
+      - name: dotnet ef migrations has-pending-model-changes
+        run: >-
+          dotnet ef migrations has-pending-model-changes
+          --project backend/src/TaskManager.Api
+          --startup-project backend/src/TaskManager.Api
+
+  # The integration suite against a real, throwaway SQL Server, applying the real migrations (AC-DB-2).
+  # The SA password is generated per run and masked; it is never stored anywhere. The container is
+  # started with `docker run` (not `services:`) so the password doesn't have to be written in this file.
+  backend-sqlserver:
+    name: Backend integration tests on SQL Server (AC-DB-2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TEST_DATABASE_PROVIDER: SqlServer
+      MSSQL_IMAGE: mcr.microsoft.com/mssql/server:2022-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj', 'dotnet-tools.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Start throwaway SQL Server (random SA password)
+        run: |
+          # 32 random hex chars + a fixed tail so the SQL Server complexity rules (upper/lower/digit) are always met.
+          MSSQL_SA_PASSWORD="$(openssl rand -hex 16)Aa1"
+          echo "::add-mask::${MSSQL_SA_PASSWORD}"
+          echo "MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD}" >> "$GITHUB_ENV"
+          # The factory adds a unique database name per test class (Initial Catalog) to this base connection.
+          echo "TEST_DATABASE_CONNECTION=Server=localhost,1433;User ID=sa;Password=${MSSQL_SA_PASSWORD};Encrypt=True;TrustServerCertificate=True;Connect Timeout=30" >> "$GITHUB_ENV"
+          export MSSQL_SA_PASSWORD
+          # `-e NAME` (no value) copies the variable from this shell, so the password isn't on the command line.
+          docker run -d --name mssql -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD "$MSSQL_IMAGE"
+
+      - name: Restore and build integration tests (overlaps with SQL Server startup)
+        run: dotnet build backend/tests/TaskManager.Api.IntegrationTests -c Release
+
+      - name: Wait for SQL Server to accept logins
+        run: |
+          export SQLCMDPASSWORD="$MSSQL_SA_PASSWORD"
+          for i in $(seq 1 60); do
+            for tools in /opt/mssql-tools18/bin /opt/mssql-tools/bin; do
+              if docker exec -e SQLCMDPASSWORD mssql "$tools/sqlcmd" -S localhost -U sa -C -l 5 -b -Q "SELECT 1" > /dev/null 2>&1; then
+                echo "SQL Server is ready (attempt $i)."
+                exit 0
+              fi
+            done
+            if [ "$(docker inspect -f '{{.State.Running}}' mssql)" != "true" ]; then
+              echo "The SQL Server container stopped."
+              break
+            fi
+            sleep 3
+          done
+          echo "SQL Server did not become ready in time. Container log:"
+          docker logs mssql
+          exit 1
+
+      - name: Integration tests (SQL Server, real migrations)
+        run: dotnet test backend/tests/TaskManager.Api.IntegrationTests -c Release --no-build
+
+      - name: SQL Server log (on failure)
+        if: failure()
+        run: docker logs mssql || true
+
+      - name: Remove SQL Server container
+        if: always()
+        run: docker rm -f mssql || true
+
+  frontend:
+    name: Frontend (lint, typecheck, unit tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # next.config.ts throws without BACKEND_URL (typegen and build load it). The value only matters for
+      # the rewrite target; Vercel builds with its own BACKEND_URL.
+      BACKEND_URL: http://localhost:5000
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # A fresh checkout has no next-env.d.ts / .next/types (both git-ignored), and the app uses the
+      # generated global PageProps / LayoutProps types, so generate them before tsc.
+      - name: Generate Next.js route types
+        run: npx next typegen
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (Vitest)
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # Playwright starts its own backend (:5100, fresh SQLite file) and frontend (:3100) via webServer.
+  e2e:
+    name: E2E (Playwright, Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj', 'dotnet-tools.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Install Playwright Chromium (+ OS dependencies)
+        run: npx playwright install --with-deps chromium
+
+      # Build the backend once up front so `dotnet run` in Playwright's webServer starts quickly.
+      - name: Build backend
+        working-directory: backend
+        run: dotnet build src/TaskManager.Api
+
+      # CI=true (set by GitHub) => 1 worker, reuseExistingServer=false, forbidOnly (playwright.config.ts).
+      - name: Playwright tests
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 14
+          if-no-files-found: ignore

@@ -1,0 +1,201 @@
+TASK MANAGER - TEST RESULTS
+===========================
+
+Project:   Task Manager (C:\Projects\task-manager)
+Run date:  2026-10-12, 14:52-14:57 local time (UTC+03:00)
+Machine:   Windows 10 (10.0.19045)
+Tools:     .NET SDK 10.0.401 (xUnit 2.9.3, Microsoft.AspNetCore.Mvc.Testing 10.0.12)
+           Node.js  v24.18.0, npm 11.16.0
+           Next.js 16.4.0, React 19.3.0, TypeScript 5.9.3, ESLint 9.39.5, Vitest 5.0.3
+           Playwright 1.64.0 (@playwright/test), Chromium 156.0.8078.4
+           (Playwright build 1248, "Chrome for Testing"; Chromium only)
+
+What changed in this run: backend integration (HTTP) tests were added for the
+API acceptance criteria that had only unit tests before (listed as "not
+covered" in the previous report), plus explicitly named tests for AC-AUTH-4 and
+AC-DUE-1, and the expired Set-Cookie check for AC-DELACCT-1. No application
+code and no test infrastructure was changed.
+
+
+SUMMARY
+-------
+
+  Suite / check                    Result   Passed  Failed  Skipped  Notes
+  -------------------------------  ------   ------  ------  -------  ------------------------------
+  Backend build (--no-incremental) PASS        -       -       -     0 warnings, 0 errors
+  Backend unit tests               PASS       196      0       0     196 total (unchanged)
+  Backend integration tests        PASS        84      0       0     was 47; +37 new
+  Frontend lint (ESLint)           PASS        -       -       -     0 problems
+  Frontend typecheck (tsc)         PASS        -       -       -     0 errors
+  Frontend unit tests (Vitest)     PASS       144      0       0     20 files (unchanged)
+  Playwright E2E                   PASS        29      0       0     unchanged suite, 1 run
+  Frontend production build        PASS        -       -       -     9 routes; .next back on :5000
+
+  OVERALL VERDICT: PASS
+  196 + 84 + 144 + 29 = 453 tests passed, 0 failed, 0 skipped. All checks clean.
+
+  Before -> after (this run): backend unit 196 -> 196, backend integration
+  47 -> 84, frontend Vitest 144 -> 144, Playwright 29 -> 29.
+  (Integration tests were 30 before the tester work started today.)
+
+
+1. BACKEND (.NET) - run in C:\Projects\task-manager\backend
+-----------------------------------------------------------
+
+Commands:
+    dotnet build TaskManager.sln --no-incremental
+    dotnet test TaskManager.sln
+
+Result:
+    Build succeeded. 0 Warning(s), 0 Error(s)
+    Passed!  - Failed: 0, Passed: 196, Skipped: 0, Total: 196 - TaskManager.Api.UnitTests.dll (net10.0)
+    Passed!  - Failed: 0, Passed:  84, Skipped: 0, Total:  84 - TaskManager.Api.IntegrationTests.dll (net10.0)
+    (The integration project normally takes about 3-4 s. It was also re-run 3 more
+    times with `dotnet test tests/TaskManager.Api.IntegrationTests --no-build`:
+    84/84 each time, no interference between test classes.)
+
+Failures: None.
+
+New integration test files (backend/tests/TaskManager.Api.IntegrationTests/),
+37 test cases, grouped by AC:
+
+  AuthAndAccountRuleTests.cs (class AuthAndAccountRuleTests, 22 cases;
+  class LockoutTests, 2 cases)
+    AC-AUTH-2     AC_AUTH_2_RegisterExistingEmail_InAnyLetterCaseOrWithExtraSpaces_Is409EmailTaken
+                  (exact, UPPER, padded with spaces, tab + MiXeD case; no cookie; one DB row)
+    AC-AUTH-3     AC_AUTH_3_RegisterBreakingAFieldRule_Is400_KeyedByThatField (Theory, 10 cases:
+                  display name 51 chars / 51 chars after trim; 4 invalid emails; password
+                  with no digit, no letter, 7 chars, 129 chars), each keyed by its one field
+                  AC_AUTH_3_RegisterAtTheLimits_Succeeds (50-char name after trim, 128-char password)
+    AC-AUTH-4     AC_AUTH_4_LoginWithCorrectCredentials_Returns200UserDto_AndSetsTheSessionCookie
+    AC-AUTH-6     AC_AUTH_6_FiveFailedLogins_LockTheAccountFor15Minutes_EvenForTheCorrectPassword
+                  (5 wrong -> 6th with the correct password is 401 invalid_credentials; still
+                  locked at 14 min 59 s; login works at 15 min 1 s, FakeTimeProvider)
+                  AC_AUTH_6_FewerThanFiveFailures_DoNotLock
+    AC-PROFILE-2  AC_PROFILE_2_BlankOrTooLongDisplayName_Is400KeyedDisplayName_AndNameIsUnchanged
+    AC-PWD-2      AC_PWD_2_WrongCurrentPassword_Is400KeyedCurrentPassword_Not401_AndNothingChanges
+    AC-PWD-3      AC_PWD_3_NewPasswordBreakingTheRulesOrEqualToCurrent_Is400KeyedNewPassword
+                  (Theory, 5 cases: no digit, no letter, 7 chars, 129 chars, same as current)
+    AC-DELACCT-1  AC_DELACCT_1_DeleteAccount_Returns204_AndExpiresTheSessionCookie
+                  (Set-Cookie "tm_session=; expires=Thu, 01 Jan 1970 ...; path=/")
+    AC-DELACCT-2  AC_DELACCT_2_WrongPassword_Is400KeyedPassword_AndAccountAndTasksRemain
+                  (checked via /auth/me, GET /tasks, a fresh login, and in the DB)
+
+  TaskRuleTests.cs (8 tests)
+    AC-CREATE-2   AC_CREATE_2_TitleOver200_DescriptionOver2000_MissingTitle_MalformedDueDate_Are400KeyedByField
+                  (also: 200/2000 chars after trimming are accepted)
+    AC-CREATE-3   AC_CREATE_3_TitleAndDescriptionAreTrimmed_WhitespaceOnlyDescriptionIsNull
+    AC-DUE-1      AC_DUE_1_CreateWithDueDateOneHourAhead_Returns201
+    AC-DUE-2      AC_DUE_2_CreateWithDueDateInThePastOrEqualToNow_Is400KeyedDueDate
+                  (equal to the FakeTimeProvider time, in Z and in +05:00, now + 0.5 s
+                  which truncates to now, 1 s ago, 1 year ago; now + 1 s is accepted)
+    AC-DUE-6      AC_DUE_6_PutChangingDueDateToADifferentPastInstant_OrFromNullToPast_Is400KeyedDueDate
+    AC-DUE-7      AC_DUE_7_PutOnAnOverdueTask_SettingDueDateToNullOrToTheFuture_Returns200
+    AC-EDIT-3     AC_EDIT_3_ValidPut_ReplacesFields_RefreshesUpdatedAt_KeepsCreatedAt_NullsClear
+    AC-DEL-1      AC_DEL_1_Delete_Returns204_ThenGetIs404_AndASecondDeleteIs404
+
+  TaskListQueryTests.cs (5 tests)
+    AC-LIST-2     AC_LIST_2_NoParameters_SortsByCreatedAtDescending
+    AC-LIST-3     AC_LIST_3_StatusAndPriorityFilters_EachWork_AndCombineWithAnd
+    AC-LIST-4     AC_LIST_4_SearchIsCaseInsensitive_OnTitleOrDescription_AndSpecialCharactersMatchLiterally
+                  (MiLk/milk/MILK in title and in description; literal %, _, \ and [,
+                  each with a look-alike task that must NOT match; "[a-z]" matches nothing)
+    AC-LIST-5     AC_LIST_5_PrioritySortsLowFirst_DueDateSortsByInstantWithNullsLastBothWays
+                  (due dates written with +14:00 / -12:00 offsets so that only the
+                  instant, not the text, gives the right order)
+    AC-LIST-6     AC_LIST_6_TitleSort_IsCaseInsensitive_AppleBananaCherry
+
+Provider-neutral design (so the same tests can run on SQL Server through
+TEST_DATABASE_PROVIDER): every test registers its own users and asserts only
+that user's tasks; case-insensitivity data is ASCII only; tasks in sort tests
+are created one fake second apart, so createdAt order is defined and the
+provider-dependent id tie-break is never asserted; all times come from the
+factory's FakeTimeProvider, formatted with the invariant culture. The lockout
+test lives in its own class (own factory and clock) because it moves the clock
+15 minutes. The factory's high default rate limit (100000) means none of these
+tests can hit 429. No infrastructure change was needed.
+
+All integration tests from earlier runs are still there and passing:
+TwoUserIsolationTests (10), ContractTests + RateLimitContractTests (7),
+AuthSessionTests (6), TaskEndpointTests (7), CsrfAndErrorShapeTests (5),
+RateLimitTests (1), StartupGuardTests (4), OpenApiTests (7).
+
+
+2. FRONTEND (Next.js) - run in C:\Projects\task-manager\frontend
+----------------------------------------------------------------
+
+2a. Lint        npm run lint        -> PASS, exit code 0
+2b. Typecheck   npm run typecheck   -> PASS, exit code 0
+2c. Vitest      npm test            -> PASS, Test Files 20 passed (20), Tests 144 passed (144),
+                                       20.39 s (Vitest-reported); e2e specs not picked up
+2d. Build       npm run build       -> PASS, compiled successfully, 9/9 pages
+                (run last, so .next points at BACKEND_URL=http://localhost:5000 from
+                .env.local again; the e2e run builds .next against :5100)
+
+Failures: None.
+
+
+3. PLAYWRIGHT E2E - run in C:\Projects\task-manager\frontend
+------------------------------------------------------------
+
+Command:  npm run test:e2e   (runs: playwright test)
+Result:   29 passed (34.3 s), exit code 0. Flaky tests: none.
+Failures: None.
+
+Unchanged from the previous report: backend `dotnet run --no-launch-profile` on
+:5100 with a fresh throwaway SQLite file (%TEMP%\task-manager-e2e\e2e.db, reset
+by the webServer command before start), RateLimiting__AuthPermitLimit=1000;
+frontend `next build && next start -p 3100` with BACKEND_URL=http://localhost:5100.
+Specs in frontend/e2e/ cover every UI AC and AC-PROXY-1:
+AC-AUTH-11, 12, 13, 14; AC-ACCT-UI-1, 2, 3; AC-CREATE-5; AC-DUE-8, 9;
+AC-LIST-8, 9, 10; AC-EDIT-5, 6; AC-DEL-2; AC-ERR-4, 5; AC-PROXY-1.
+
+
+4. CLEANUP AFTER THE RUN
+------------------------
+
+- Playwright stopped both servers. Ports 5000, 3000, 5100 and 3100 are free;
+  no TaskManager.Api or node processes are left.
+- The throwaway e2e database (%TEMP%\task-manager-e2e\ with e2e.db, -wal, -shm)
+  was deleted.
+- The dev database backend/src/TaskManager.Api/taskmanager.db was not touched
+  (same hash before and after).
+
+
+BUGS FOUND IN APPLICATION CODE
+------------------------------
+
+None. Every new test passed against the unchanged app.
+
+Observation (not a bug): the lockout check is `lockoutEnd >= now`
+(AppUserManager, same as ASP.NET Core Identity), so at exactly 15:00 after the
+5th failure the account is still locked; it unlocks one tick later. AC-AUTH-6
+says "after 15 minutes", so the test checks 14:59 (locked) and 15:01 (unlocked)
+and does not pin down the exact boundary.
+
+
+ACCEPTANCE CRITERIA COVERAGE
+----------------------------
+
+Every API acceptance criterion in SPEC 9 now has at least one backend
+integration (HTTP) test named with its AC ID, except AC-DB-2 (see below):
+AC-AUTH-1 to 10, AC-CSRF-1, AC-PROFILE-1, 2, AC-PWD-1 to 4, AC-DELACCT-1, 2,
+AC-CREATE-1 to 4, AC-DUE-1 to 7, AC-LIST-1 to 7, AC-EDIT-1 to 4, AC-DEL-1,
+AC-ERR-1 to 3, AC-DB-1, AC-HEALTH-1.
+Every UI criterion and AC-PROXY-1 has a Playwright test.
+
+
+NOT COVERED BY THIS RUN
+-----------------------
+
+- SQL Server (AC-DB-2): all backend tests ran against SQLite in-memory only.
+  This machine has no SQL Server, LocalDB or Docker, so the integration suite
+  has not been run against SQL Server with the real migrations, and
+  `dotnet ef migrations has-pending-model-changes` was not part of this run.
+  This is planned for the GitHub Actions CI job. That run matters most for
+  AC-LIST-4 (the SQL Server-only "[" escape) and AC-LIST-6 (title collation);
+  the new tests are written to be provider-neutral for it.
+- Playwright was run on Chromium only (as requested) and not on CI (no CI yet).
+- npm audit: 5 high-severity advisories, all in `braces`, a transitive dev-tool
+  dependency that predates the tester work. `npm audit --omit=dev` (runtime
+  dependencies) reports 0 vulnerabilities.

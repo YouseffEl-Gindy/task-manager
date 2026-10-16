@@ -1,0 +1,73 @@
+# Root .gitignore for the task-manager monorepo (backend/ + frontend/).
+# frontend/.gitignore adds Next.js-specific rules on top of these; the two don't conflict.
+
+# ---------- Secrets and local config (never commit) ----------
+# Env files: everything except the documented examples.
+.env
+.env.*
+!.env.example
+# Azure publish profiles (contain deploy credentials). Git patterns are case-sensitive,
+# so cover the common spellings explicitly.
+*.PublishSettings
+*.publishsettings
+*.publishSettings
+*.Publishsettings
+*.PUBLISHSETTINGS
+*.pubxml
+*.pubxml.user
+# .NET user secrets live outside the repo (%APPDATA%\Microsoft\UserSecrets), but never allow a copy in here.
+secrets.json
+# Private keys / certificates
+*.pem
+*.pfx
+*.key
+
+# ---------- .NET ----------
+bin/
+obj/
+publish/
+TestResults/
+*.user
+*.suo
+*.userprefs
+.vs/
+*.binlog
+
+# Local SQLite database (backend/src/TaskManager.Api/taskmanager.db) and its WAL/SHM files
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ---------- Node / Next.js ----------
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.vercel/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Playwright output
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# ---------- Editors ----------
+.vscode/
+.idea/
+
+# ---------- OS junk ----------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*~
