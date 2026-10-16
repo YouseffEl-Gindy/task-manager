@@ -80,6 +80,10 @@ jobs:
       - name: Restore local tools (dotnet-ef, pinned in dotnet-tools.json)
         run: dotnet tool restore
 
+      # dotnet ef builds the project without restoring it, so a fresh checkout needs an explicit restore.
+      - name: Restore
+        run: dotnet restore backend/src/TaskManager.Api
+
       - name: dotnet ef migrations has-pending-model-changes
         run: >-
           dotnet ef migrations has-pending-model-changes
